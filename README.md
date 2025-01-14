@@ -6,7 +6,7 @@ Docker 학습 과정과 실습 내용을 정리한 저장소 | Learning and prac
 ## Day 1: Docker 기초 개념
 
 ### 1. 도커(Docker)란?
-- **컨테이너 런타임(Container Runtime)** 또는 **컨테이너 엔진(Container Engine)**을 의미  
+- **컨테이너 런타임(Container Runtime)** 또는 **컨테이너 엔진(Container Engine)**을 의미
 - 격리된 환경(컨테이너)에서 애플리케이션을 실행할 수 있도록 도와주는 소프트웨어
 
 ### 2. 도커를 왜 쓰는가?
