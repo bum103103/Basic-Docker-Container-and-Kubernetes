@@ -1,5 +1,5 @@
-# Docker-Study
-Docker 학습 과정과 실습 내용을 정리한 저장소 | Learning and practicing Docker from basics to advanced concepts
+# Basic-Docker-Container-and-Kubernetes
+Docker와 쿠버네티스 학습 과정과 실습 내용을 정리한 저장소 | Learning and practicing Docker and Kubernetes from basics to advanced concepts
 
 ---
 
@@ -367,5 +367,305 @@ docker run -d \
   - 기본 브리지(`docker0`) vs 사용자 정의 브리지  
   - 컨테이너 이름으로 통신하려면 사용자 정의 브리지 필요  
 - **WordPress + MySQL** 실습으로 Volume + Network 연습
+
+---
+
+아래는 **Day 3** 학습 내용을 “쿠버네틱스 설치 및 기본 개념” 중심으로 정리한 예시입니다. 내용이 길지만, 큰 흐름을 잡기 좋도록 **섹션별**로 구성했습니다. 필요에 따라 세부 내용을 추가하거나 생략하실 수 있습니다!
+
+---
+
+# Day 3: Kubernetes 설치 & 기본 개념
+
+## 1. Kubernetes란?
+
+- **쿠버네틱스(Kubernetes)**: 컨테이너(‘격리된 애플리케이션’)를 **대규모로 배포**하고 **자동 관리**(오케스트레이션)해 주는 오픈소스 소프트웨어
+- 쿠버네틱스 = “이 많은 컨테이너들을 효율적으로 배포/업데이트/확장하자!”
+- **오픈시프트(OpenShift)**:  
+  - 레드햇(Red Hat)이 제공하는 **쿠버네틱스 기반 상용 솔루션**  
+  - 오픈소스 버전보다 유지보수/버전관리 측면에서 편리해 **기업 환경**에서 많이 활용  
+
+<br/>
+
+## 2. 실습 환경 개요
+
+- **4대의 서버**(VM)로 쿠버네틱스 클러스터 구성
+  - 1대는 **마스터 노드**(master.test.com)
+  - 3대는 **워커 노드**(node1, node2, node3)
+- 마치 여러 컴퓨터를 하나의 커다란 시스템(클러스터)처럼 동작시킴
+
+<br/>
+
+## 3. 사전 준비 & 설정
+
+### 3.1 호스트네임 설정
+```bash
+# 마스터 노드에서 예시
+hostnamectl set-hostname master.test.com
+hostname  # 변경 확인
+```
+- FQDN(예: `master.test.com`) → `컴퓨터명.도메인명`
+
+### 3.2 Swap 비활성화
+쿠버네틱스는 스왑을 끈 상태로 동작하는 것을 권장(예측 가능한 리소스 관리).
+```bash
+swapon -s         # 현재 스왑 확인
+swapoff -a        # 스왑 비활성화
+swapon -s         # 다시 확인(없어야 함)
+
+vi /etc/fstab
+# /swap.img none swap sw 0 0  ← 주석 처리(#)로 비활성
+```
+
+### 3.3 리눅스 커널 설정
+쿠버네틱스 네트워크를 위해 커널 모듈 & 네트워크 패킷 포워딩 설정.
+
+1. **커널 모듈 로드 설정**  
+   ```bash
+   # /etc/modules-load.d/k8s.conf (새 파일)
+   br_netfilter
+   ```
+
+2. **IP 포워딩 & 방화벽 관련 설정**  
+   ```bash
+   # /etc/sysctl.d/k8s.conf (새 파일)
+   net.bridge.bridge-nf-call-iptables = 1
+   net.bridge.bridge-nf-call-ip6tables = 1
+   net.ipv4.ip_forward = 1
+   ```
+   ```bash
+   systemctl --system  # 설정 재적용 후 q로 종료
+   ```
+
+<br/>
+
+## 4. 쿠버네티스 설치 (마스터 노드)
+
+공식 문서 참고:  
+[Install kubeadm, kubelet, kubectl](https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/install-kubeadm/)
+
+### 4.1 패키지 설치
+```bash
+apt-get update
+apt-get install -y apt-transport-https ca-certificates curl gpg
+
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] \
+https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /' \
+| sudo tee /etc/apt/sources.list.d/kubernetes.list
+
+apt-get update
+apt-get install -y kubelet kubeadm kubectl
+apt-mark hold kubelet kubeadm kubectl
+
+systemctl enable --now kubelet
+```
+- 버전 확인:
+  ```bash
+  kubectl version
+  kubeadm version
+  kubelet --version
+  ```
+
+### 4.2 Docker 설정 수정
+쿠버네티스 권장 방식인 `systemd` cgroup 사용 및 `overlay2` 스토리지 드라이버 설정.
+
+```bash
+cat > /etc/docker/daemon.json <<EOF
+{
+  "exec-opts": ["native.cgroupdriver=systemd"],
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "100m"
+  },
+  "storage-driver": "overlay2"
+}
+EOF
+
+systemctl daemon-reload
+systemctl restart docker
+systemctl enable docker
+```
+
+### 4.3 /etc/containerd/config.toml 백업
+```bash
+ls /etc/containerd/config.toml
+mv /etc/containerd/config.toml /tmp
+```
+- (필요 시) 컨테이너런타임 구성에 맞춰 추가 설정 가능
+
+<br/>
+
+## 5. 모든 노드 /etc/hosts 설정
+
+```bash
+vi /etc/hosts
+192.168.11.10   master.test.com
+192.168.11.11   node1.test.com
+192.168.11.12   node2.test.com
+192.168.11.13   node3.test.com
+```
+- 마스터/노드 간 **도메인명**으로 통신 가능하도록
+
+<br/>
+
+## 6. 노드 VM 클론 & 개별 설정
+
+- **node1** VM 클론 생성 후 부팅
+  - `hostnamectl set-hostname node1.test.com`
+  - IP 수정 (`/etc/netplan/00-installer-config.yaml` 등)
+  - `netplan apply`  
+- **node2**, **node3**도 같은 방식으로 진행  
+- 마스터에서 `ping node1.test.com` 등으로 통신 테스트
+
+<br/>
+
+## 7. 마스터 노드 초기화 (kubeadm init)
+
+```bash
+kubeadm init \
+  --apiserver-advertise-address=192.168.11.10 \
+  --pod-network-cidr=10.244.0.0/16
+```
+- 실행 후 출력되는 `kubeadm join ...` 명령어를 **복사**해둠 (나중에 노드에서 join 명령에 사용)
+
+### 7.1 Kubeconfig 설정
+```bash
+mkdir -p $HOME/.kube
+cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+chown $(id -u):$(id -g) $HOME/.kube/config
+
+# 혹은
+export KUBECONFIG=/etc/kubernetes/admin.conf
+vi ~/.bashrc
+# 아래 두 줄 추가
+export KUBECONFIG=/etc/kubernetes/admin.conf
+source <(kubectl completion bash)
+```
+- 이 설정으로 마스터 노드에서 `kubectl` 명령 사용 가능
+
+### 7.2 네트워크 플러그인 설치 (Flannel 예시)
+```bash
+kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+```
+- `kubectl get pod --namespace kube-system` → 플래널(Flannel) 관련 파드가 정상 실행되는지 확인
+
+<br/>
+
+## 8. 워커 노드 Join
+
+1. **마스터에서 ssh-keygen** & **ssh-copy-id**로 노드에 무비밀번호 접속 설정(옵션)
+   ```bash
+   ssh-copy-id node1.test.com
+   ssh-copy-id node2.test.com
+   ssh-copy-id node3.test.com
+   ```
+2. **각 노드에서 Join**  
+   ```bash
+   ssh node1.test.com
+   kubeadm join 192.168.11.10:6443 --token <토큰> \
+     --discovery-token-ca-cert-hash sha256:<해시값>
+   exit
+   ```
+   - node2, node3도 동일 진행
+3. **노드 확인**  
+   ```bash
+   kubectl get nodes
+   ```
+   - READY 상태가 되면 클러스터 가입 완료
+
+### 8.1 토큰 만료 시 재발행
+```bash
+kubeadm token list
+kubeadm token delete <기존토큰>
+kubeadm token create --print-join-command
+```
+- 새 토큰으로 join 명령어 다시 실행
+
+<br/>
+
+## 9. 스냅샷 & 클러스터 확인
+
+- 모두 설정이 끝났다면 **VM 스냅샷** 촬영(복구용)
+- `kubectl cluster-info`, `kubectl get nodes -o wide` 등으로 상태 확인
+
+<br/>
+
+## 10. 기본 쿠버네틱스 리소스 실습
+
+### 10.1 Pod 생성
+```bash
+kubectl run web --image=nginx:1.12
+kubectl get pod
+kubectl get pod -o wide
+```
+- `curl http://<Pod IP>` 방식으로 HTTP 응답 테스트 (같은 네트워크에서 접근 가능)
+
+### 10.2 Pod 수정 (예: nginx → httpd)
+```bash
+kubectl edit pod web
+# 이미지 부분을 httpd로 변경
+```
+- YAML 문법 주의(들여쓰기/스페이스 등)
+
+### 10.3 YAML 매니페스트 파일 작성
+```yaml
+# 1.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web2
+spec:
+  containers:
+  - name: web2
+    image: httpd
+```
+```bash
+kubectl apply -f 1.yaml
+kubectl get pod
+```
+- Pod 상태(Pending, ContainerCreating, Running 등)를 확인
+
+### 10.4 Pod 삭제
+```bash
+kubectl delete -f 1.yaml
+kubectl delete pod web
+```
+
+<br/>
+
+## 11. 쿠버네틱스 구조 개념
+
+1. **마스터 노드**  
+   - **API 서버**: 클라이언트(kubectl 등) 명령을 받아들이는 핵심  
+   - **etcd**: 클러스터 상태/메타데이터 저장  
+   - **스케쥴러**: 새 파드를 어느 노드에 배치할지 결정  
+   - **컨트롤러 매니저**: 노드·파드 상태 모니터링 & 자동 복구(아프면 다른 노드로 재할당)
+
+2. **워커 노드**  
+   - **kubelet**: 파드 상태를 모니터링 & 실행 관리  
+   - **kube-proxy**: 파드 접근(네트워크) 설정, 로드밸런싱 역할  
+   - **컨테이너 런타임**: 실제 파드를 실행하는 소프트웨어(도커 등)  
+   - **Pod**: 컨테이너를 담는 최소 배포 단위(‘화분’에 식물을 심듯)
+
+3. **추가 개념**  
+   - **ReplicaSet**, **Deployment**: 파드를 여러 개 복제, 버전 업데이트 등(파드의 상위 개념)  
+   - **Service**: 파드에 안정적인 접근(클러스터 내부/외부) 제공  
+   - **Ingress**: 외부 트래픽을 파드로 라우팅하는 진입점  
+   - **Volume/Storage**: 파드가 재시작되거나 재배포돼도 데이터 보존을 위해 외부 스토리지 연결  
+   - **Namespace**: 클러스터 리소스를 논리적으로 구분/격리하는 단위 (예: `kube-system`, `default` 등)
+
+<br/>
+
+## Day 3 요약
+
+1. **쿠버네틱스**: 대규모 컨테이너 관리/오케스트레이션 도구  
+2. **환경 설정**: 스왑 비활성화, 커널 모듈 설정, Docker cgroup 등 필요  
+3. **kubeadm init & join**으로 마스터/워커 노드 클러스터 구성  
+4. **Flannel 등 네트워크 플러그인 설치** 필수적임임  
+5. **kubectl** 명령으로 파드(Pod) 생성·확인·삭제  
+   - YAML 매니페스트 파일(`apiVersion`, `kind`, `metadata`, `spec`) 중요  
+6. **쿠버네틱스 아키텍처**: 마스터(API 서버, etcd, 스케쥴러 등) / 워커(kubelet, kube-proxy, 컨테이너 런타임)  
 
 ---
