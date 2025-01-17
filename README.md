@@ -665,3 +665,737 @@ kubectl delete pod web
 6. **쿠버네틱스 아키텍처**: 마스터(API 서버, etcd, 스케쥴러 등) / 워커(kubelet, kube-proxy, 컨테이너 런타임)  
 
 ---
+아래는 **Day 4** 학습 내용을 **가능한 자세하게** 정리한 자료입니다.  
+메모에 있는 모든 내용(매니페스트 파일, 라벨, 파드 재시작 정책, 파일 복사, ReplicaSet, Deployment 개념 등)을 충분히 담아 재구성했습니다.  
+(필요에 따라 더욱 간략히 줄이거나, 항목별로 세분화할 수 있습니다.)
+
+---
+
+# Day 4: 매니페스트 파일·라벨·파드 재시작 정책·ReplicaSet·Deployment
+
+## 1. 매니페스트 파일(YAML)
+
+1. **개념**  
+   - 쿠버네티스의 자원(파드, ReplicaSet, Deployment 등)을 정의하는 **설정 파일**  
+   - YAML 형식으로 작성, `kubectl apply -f <파일명>`으로 적용  
+   - 작성된 매니페스트는 API 서버 → etcd에 저장되어, **관리**되고 **상태**를 유지
+
+2. **매니페스트 예시 & 문법 주의**  
+   - 들여쓰기는 탭이 아닌 **스페이스**  
+   - **키: 값** 형태  
+   - 여러 값이 필요한 경우 `-` (하이픈)으로 리스트 작성  
+   - **잘못된 예시** (메모 내용 중 ‘종속 관계가 어긋난’ YAML):
+     ```yaml
+     taxonomy:
+       kingdom: 생물
+         phylum: 동물
+           class: 포유류
+             species: 소나무    # X (식물이 포유류 아래에 들어갈 수 없음)
+             species: 고양이    # O (동물/포유류에 해당)
+     ```
+     이런 식으로 로직이 잘못되면 YAML 구문 에러 또는 의도치 않은 설정이 되므로 주의
+
+3. **명령어 vs 매니페스트 파일**  
+   - 쿠버네티스 리소스를 만드는 방법은 명령어(`kubectl run`, `kubectl create`)도 있지만,  
+   - **매니페스트(YAML) 작성**이 더욱 **체계적**이고 버전 관리에도 유리
+
+<br/>
+
+## 2. 라벨(Label)과 라벨 제거
+
+1. **라벨**이란?  
+   - 쿠버네티스 리소스(파드, 노드 등)를 **식별**하고 **그룹화**하기 위한 **Key=Value** 쌍  
+   - 예: `state=red`, `version=dev`, `region=us-west`  
+   - 매니페스트 파일의 `metadata.labels` 영역이나, `kubectl label` 명령어로 설정 가능
+
+2. **라벨 추가/삭제**  
+   - 예) 특정 파드에 `state=red` 라벨 추가:
+     ```bash
+     kubectl label pod web5 state=red
+     ```
+   - 라벨 제거(`state-`):
+     ```bash
+     kubectl label pod web5 state-
+     kubectl get po --show-labels
+     ```
+   - 노드 라벨도 유사하게:
+     ```bash
+     kubectl label nodes node1.test.com region-
+     kubectl get nodes --show-labels
+     ```
+
+3. **리소스 삭제**  
+   - `kubectl delete pod --all` → 현재 네임스페이스의 모든 파드 제거  
+   - 삭제 후 `kubectl get po`로 확인  
+   - 테스트 시 `watch -n 1 kubectl get pod`(실시간 모니터링) 적극 활용
+
+<br/>
+
+## 3. 파드(Pod)의 재시작 정책 (restartPolicy)
+
+1. **쿠버네티스 파드의 기본 정책**: `Always`  
+   - 파드 내 컨테이너가 종료되면 **항상** 재시작  
+   - 쿠버네티스는 **서비스 가용성** 유지 목적
+
+2. **옵션**  
+   - `OnFailure`: 비정상 종료(Exit code ≠ 0) 시에만 재시작. 정상 종료면 재시작 안 함 → 주로 배치 작업(성공 후 종료)  
+   - `Never`: 어떤 상황에서도 재시작하지 않음 → 단 한 번만 실행해야 하는 작업
+
+3. **Docker vs Kubernetes**  
+   - Docker 기본 옵션: `--restart=no`(자동 재시작 안 함)  
+   - Kubernetes 기본값: `restartPolicy=Always`  
+   - → 쿠버네티스는 **장기 운영**(서비스 지속성)을 목표, 도커는 **개별 컨테이너 실행** 초점
+
+4. **매니페스트 작성 예**  
+   ```yaml
+   apiVersion: v1
+   kind: Pod
+   metadata:
+     name: web5
+     labels:
+       state: red
+       version: devlope
+   spec:
+     # restartPolicy: OnFailure  # (기본값은 Always)
+     containers:
+     - name: www
+       image: nginx:1.12
+       command:
+         - echo
+         - "i am tired"
+   ```
+   - `kubectl apply -f 3.yaml` → 파드 생성  
+   - `kubectl delete -f 3.yaml` → 삭제 후 재적용  
+   - `restartPolicy`를 제거하거나 주석 처리하면 자동으로 `Always`가 적용됨
+
+5. **kubectl explain**  
+   - 명령어가 기억 안 날 때 유용  
+   - 예) `kubectl explain pod.spec.restartPolicy`  
+   - 파드 정의에서 각 필드의 설명/타입 등을 보여줌
+
+<br/>
+
+## 4. 파드 내부 명령 실행 & 파일 복사
+
+1. **컨테이너 내부 명령 실행**: `kubectl exec`  
+   - 예)  
+     ```bash
+     kubectl exec db -- ls /etc
+     kubectl exec db -- env
+     kubectl exec db -- ifconfig
+     ```
+   - `kubectl exec <pod명> -- <명령어>`
+
+2. **파일 복사**: `kubectl cp`  
+   - 구문: `kubectl cp <소스> <목적>`  
+   - 예)  
+     - **파드 → 로컬**: `kubectl cp db:/etc/xattr.conf x.conf`  
+     - **로컬 → 파드**: `kubectl cp 4.yaml db:/etc`  
+   - “(앞에 것)을 (뒤에 것)으로 복사”로 이해  
+   - 파드 내부를 수정/확인할 때 간단히 활용 가능
+
+3. **환경 변수 설정 예**  
+   ```yaml
+   apiVersion: v1
+   kind: Pod
+   metadata:
+     name: db
+   spec:
+     containers:
+     - name: db
+       image: mysql
+       env:
+         - name: MYSQL_ROOT_PASSWORD
+           value: donga
+         - name: USERDB
+           value: lunch
+         - name: ConnectUser
+           value: linuzle
+   ```
+   - `kubectl apply -f 4.yaml`  
+   - `kubectl exec db -- env`로 환경 변수 확인 가능
+
+<br/>
+
+## 5. 간단 실습: 웹페이지 변경
+
+1. **문제 시나리오**  
+   - `www`라는 이름의 파드 생성 (이미지: `nginx:1.12`)  
+   - 호스트(마스터 노드 등)에 `index.html` 파일 생성  
+   - 해당 파일을 파드 내부(`/usr/share/nginx/html`)로 복사  
+   - 파드 IP로 curl 확인
+
+2. **실습 과정**  
+   - ① 파드 생성  
+     ```bash
+     kubectl run www --image=nginx:1.12
+     ```
+   - ② `index.html` 작성  
+     ```html
+     <!DOCTYPE html>
+     <html lang="en">
+     <body>
+       Hello k8s
+     </body>
+     </html>
+     ```
+   - ③ 파일 복사  
+     ```bash
+     kubectl cp index.html www:/usr/share/nginx/html
+     ```
+   - ④ 파드 IP 확인  
+     ```bash
+     kubectl get pod -o wide
+     # EX) 10.244.x.y
+     curl http://10.244.x.y
+     # 결과: Hello k8s
+     ```
+
+3. **사이드카 패턴** (간단 개념)  
+   - “일반적으로 파드 하나에는 컨테이너 하나”가 많지만,  
+   - 서로 밀접하게 협력하는 “유사 컨테이너”가 있으면 한 파드 안에 여러 컨테이너를 두는 경우(사이드카)  
+   - 예: 로그 수집 컨테이너와 실제 앱 컨테이너가 같은 파드에 들어가 협력
+
+<br/>
+
+## 6. ReplicaSet
+
+### 6.1 문제 상황
+
+- 만약 1000개의 파드를 생성하려면?  
+  - `kubectl run pod1 --image=nginx` … `pod1000`처럼 명령어 1000번?  
+  - 매니페스트 1000개 작성?  
+  - **매우 비효율적** → 해결책 = **ReplicaSet**
+
+### 6.2 ReplicaSet 개념
+
+- “동일한 파드를 **N개** 유지”하는 쿠버네티스 리소스  
+- `replicas:` 값 설정 → 필요한 파드 수 유지  
+- **라벨 셀렉터(selector)**로 “어떤 파드를 관리할지” 지정
+
+#### 예시 매니페스트
+```yaml
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: myrs
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      aaa: web
+  template:
+    metadata:
+      labels:
+        aaa: web
+    spec:
+      containers:
+      - name: www
+        image: nginx:1.12
+```
+- `replicas: 3` → 3개 파드를 유지  
+- `matchLabels: {aaa: web}` & `template`에 같은 라벨 설정 → 새로 생성되는 파드는 자동으로 `aaa=web` 라벨이 붙고, ReplicaSet이 이를 관리
+
+### 6.3 주요 동작
+
+1. `kubectl apply -f rs.yaml` → `kubectl get rs` & `kubectl get po -o wide`  
+2. 파드 개수 조정  
+   - `kubectl scale rs myrs --replicas=7`  
+   - 파드가 자동으로 7개 생성, 스케줄러가 노드에 배치  
+   - `kubectl scale rs myrs --replicas=2` → 2개만 남기고 나머지는 삭제
+3. 자가치유(자동 복구)  
+   - 특정 파드를 `kubectl delete po <파드이름>`로 지워도, ReplicaSet이 “파드가 모자람”을 감지  
+   - 새 파드를 생성해 다시 2개(또는 설정값) 상태를 유지
+
+### 6.4 참고: 실무에서는 Deployment
+
+- **ReplicaSet**은 파드 “숫자 유지”라는 기능만 존재  
+- 서비스 운영 시 **버전 업데이트**, **롤백** 등 고급 기능 필요 → **Deployment** 사용  
+- Deployment는 내부적으로 ReplicaSet을 생성·관리하는 **상위 컨트롤러**
+
+<br/>
+
+## 7. Deployment (기초 개념 복습)
+
+1. **정의**  
+   - “ReplicaSet” + “버전관리(업데이트/롤백)” 등을 통합  
+   - `kind: Deployment`, 내부에서 자동으로 **ReplicaSet** 만들어 파드를 관리
+
+2. **strategy (업데이트 전략)**  
+   - **RollingUpdate(기본값)**: 파드를 하나씩 교체, 서비스 중단 없는 배포  
+   - **Recreate**: 모든 파드를 한 번에 종료 후 새 버전 생성 → 다운타임 발생
+
+3. **매니페스트 예시**  
+   ```yaml
+   apiVersion: apps/v1
+   kind: Deployment
+   metadata:
+     name: mydp
+   spec:
+     replicas: 3
+     selector:
+       matchLabels:
+         app: webapp
+     template:
+       metadata:
+         labels:
+           app: webapp
+       spec:
+         containers:
+         - name: last
+           image: nginx:1.12
+   ```
+   - `kubectl apply -f dp.yaml` → `kubectl get deploy,rs,po`  
+   - 실제로는 **디플로이먼트**(mydp) → **레플리카셋**(mydp-xxxx) → **파드**(3개) 순으로 생성되며, 모든 과정 자동화
+
+4. **스케일링 & 이미지 업데이트**  
+   - 스케일링:
+     ```bash
+     kubectl scale deploy mydp --replicas=5
+     ```
+   - 이미지 업데이트:
+     ```bash
+     kubectl set image deploy mydp last=nginx:1.14
+     ```
+5. **롤아웃(Rollout) & 롤백(Rollback)**  
+   - **롤아웃**: 새로운 버전으로 컨테이너 이미지를 교체  
+   - **롤백**: 이전 버전(리비전)으로 되돌리기
+   ```bash
+   kubectl rollout history deploy mydp
+   kubectl rollout undo deploy mydp --to-revision=1
+   ```
+   - 언제나 “**어느 시점으로**” 롤백할지(`--to-revision`)가 핵심
+
+---
+
+## Day 4 요약
+
+1. **매니페스트(YAML) 파일**  
+   - 쿠버네티스 자원(파드, ReplicaSet 등)을 정의하는 설정  
+   - 라벨/셀렉터, 재시작 정책 등 다양한 옵션을 문서화  
+2. **라벨(Label) 추가·제거**  
+   - `kubectl label`, `metadata.labels`  
+   - 핵심: 리소스를 그룹핑하고, ReplicaSet/Service 등에서 **선택(selector)** 시 활용  
+3. **파드 재시작 정책**  
+   - **Always**(기본), **OnFailure**, **Never**  
+   - 쿠버네티스는 서비스 안정성 위해 항상 재시작하는 게 일반적  
+4. **파드 내부 명령(`kubectl exec`) & 파일 복사(`kubectl cp`)**  
+   - 환경 변수 확인, 파일 업로드/다운로드 등 편리하게 활용  
+5. **ReplicaSet**  
+   - “N개의 동일 파드를 자동 유지”  
+   - 자가치유(파드가 사라지면 새 파드 생성)  
+   - 실무에서 버전업 등 고급 기능은 없음 → **Deployment** 사용  
+6. **Deployment** (간단 소개)  
+   - ReplicaSet 상위 개념  
+   - **버전 관리**(롤링 업데이트, 롤백) 기능 포함  
+   - `kubectl set image`, `kubectl rollout history/undo` 명령으로 컨테이너 이미지를 유연하게 업데이트
+
+
+---
+
+---
+
+# Day 5: Deployment 업데이트 전략, 다양한 Service 유형, Ingress
+
+## 1. Deployment 업데이트 전략
+
+### 1.1 RollingUpdate vs Recreate
+
+1. **RollingUpdate (기본값)**  
+   - 새 파드를 하나씩 생성하면서 동시에 기존 파드를 하나씩 제거  
+   - 점진적이고 단계적인 업데이트 → **무중단 배포**가 가능  
+   - 배포 도중에 일부 새 버전과 일부 구 버전이 혼재하는 시점이 존재  
+   - 서비스 사용자는 구 버전과 새 버전을 순차적으로 만나게 됨  
+   - 안전하지만 배포 중에 여러 버전이 공존한다는 점이 특징
+
+2. **Recreate**  
+   - 기존 파드를 **모두 중단** 후 새 버전을 생성  
+   - 업데이트 시점에 기존 파드는 완전히 사라지고, 새 파드를 생성하기 전까지 **다운타임**이 발생  
+   - 배포 과정이 간단하며 “버전 혼합”이 일어나지 않음  
+   - 금융권 등 일부 업종에서는 잠깐의 서비스 중단을 감수해도 버전을 확실히 구분하고 싶을 때 사용 가능
+
+#### 예시 매니페스트
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mydp
+spec:
+  replicas: 10
+  selector:
+    matchLabels:
+      app: websvr
+  strategy:
+    type: Recreate   # RollingUpdate → Recreate 로 변경
+  template:
+    metadata:
+      labels:
+        app: websvr
+    spec:
+      containers:
+      - name: last
+        image: nginx:1.12
+```
+- `strategy.type`을 `Recreate`로 지정하면, 기존 파드를 전부 종료 후 새 파드를 만드는 **전체 교체** 방식으로 배포가 진행됨
+
+### 1.2 실제 업데이트 과정 관찰
+
+1. **디플로이먼트 생성**  
+   ```bash
+   kubectl apply -f mydp.yaml
+   kubectl get deploy,rs,po
+   watch -n 1 kubectl get pod
+   ```
+   - `watch` 명령어로 파드 상태 변화를 실시간 관찰 가능
+
+2. **이미지 교체 (RollingUpdate/Recreate 모두 가능)**  
+   ```bash
+   kubectl set image deployment mydp last=nginx:1.14
+   ```
+   - `last=nginx:1.14` → `컨테이너 이름=새 이미지` 형태  
+   - RollingUpdate일 경우 새 파드(1.14)가 하나씩 올라오고, 구 파드(1.12)가 하나씩 내려가는 과정을 볼 수 있음  
+   - Recreate일 경우 구 파드가 완전히 사라졌다가 새 파드가 생성 → 잠시 다운타임 발생
+
+3. **롤백(Rollback) 확인**  
+   - 롤아웃(업데이트) 히스토리:
+     ```bash
+     kubectl rollout history deploy mydp
+     ```
+   - 특정 리비전 확인:
+     ```bash
+     kubectl rollout history deploy mydp --revision=2
+     ```
+   - 리비전 2로 되돌리기:
+     ```bash
+     kubectl rollout undo deploy mydp --to-revision=2
+     ```
+   - 쿠버네티스는 과거 배포 버전을 “리비전” 단위로 저장해 두어, 필요 시 쉽게 돌릴 수 있음
+
+<br/>
+
+## 2. Service 개념 및 타입별 특징
+
+쿠버네틱스에서 **파드(Pod)**는 언제든 **생성/종료**될 수 있고, IP도 자주 바뀝니다.  
+이런 환경에서 파드에 안정적으로 접속하기 위해 **Service**를 사용합니다.  
+**Service** = “라벨로 묶인 파드”에 **하나의 대표 IP/포트**를 부여하고, 부하분산(Load Balancing) 및 장애 시 다른 파드로 트래픽을 넘기는 역할도 담당.
+
+### 2.1 Service 주요 기능
+
+1. **파드 IP 변경 문제 해결**: 클라이언트가 직접 파드 IP를 모를 때, 서비스 주소(“대표번호”)만 알면 됨  
+2. **로드 밸런싱**: 레플리카 개수가 많은 파드 중 하나에만 트래픽이 몰리지 않도록 자동 분산  
+3. **Failover**: 특정 파드가 다운되면, 정상 파드로 자연스럽게 요청을 라우팅  
+4. **DNS 연동**: 쿠버네티스 내부 DNS(CoreDNS)가 서비스 이름을 IP로 매핑 → “`curl svc-name`” 방식 사용 가능
+
+### 2.2 Service 타입 정리
+
+1. **ClusterIP (기본)**  
+   - 클러스터 내부에서만 사용 가능한 IP 할당  
+   - 외부(인터넷)에서 접근할 수 없음(내부망 용도)  
+   - 주로 **내부 마이크로서비스** 간 통신에 사용
+
+2. **NodePort**  
+   - 노드(서버) 자체의 포트(30000~32767)를 열어 외부 접근 허용  
+   - 예) `nodePort: 30000` → “`http://<노드IP>:30000`”  
+   - 간단하지만, 큰 단점:  
+     - 외부 사용자는 **노드 IP**와 **노드 포트**를 알아야 함  
+     - 포트 충돌, 스케일링 문제 등 불편 사항 존재
+
+3. **LoadBalancer**  
+   - 클라우드 환경(GCP, AWS 등) 또는 **MetalLB** 같은 도구를 통해 **외부 IP**를 자동 할당  
+   - NodePort 대신, 로드밸런서가 모든 노드 앞단에 서서 트래픽을 받아 파드로 전달  
+   - **무중단**과 **고가용성(HA)** 보장에 적합  
+   - 온프레미스 환경에서는 별도 로드밸런서(예: MetalLB)를 설치해야 가능
+
+4. **ExternalName**  
+   - 클러스터 내부 DNS에서 도메인만 **외부 주소**로 매핑  
+   - “`external-svc.default.svc.cluster.local`” → “`www.google.com`” 처럼 연결  
+   - 주로 내부 앱이 외부 서비스를 **로컬 주소**처럼 사용해야 할 때 유용
+
+<br/>
+
+## 3. ClusterIP 실습 예시
+
+1. **파드 준비**  
+   ```bash
+   kubectl run myweb --image=nginx:1.12 --labels "app=web-svr" --port 80
+   kubectl get pod -o wide
+   ```
+   - 라벨(`app=web-svr`)을 붙여둬야 서비스에서 파드를 인식 가능
+
+2. **서비스 매니페스트**  
+   ```yaml
+   apiVersion: v1
+   kind: Service
+   metadata:
+     name: svc1
+   spec:
+     selector:
+       app: web-svr   # 파드의 라벨과 매칭
+     type: ClusterIP  # 기본값이므로 생략 가능
+     ports:
+     - port: 80       # 서비스(대표) 포트
+       targetPort: 80 # 실제 파드 컨테이너 포트
+       protocol: TCP
+   ```
+   ```bash
+   kubectl apply -f svc1.yaml
+   kubectl get svc
+   ```
+3. **서비스 동작 확인**  
+   - 클러스터 내부의 **또 다른 파드**(예: `clientpod`)에서 `curl svc1` or `curl <클러스터IP>`로 접속 테스트  
+   - `kubectl exec -it clientpod -- bash` → `curl svc1`
+
+<br/>
+
+## 4. NodePort 실습 예시
+
+1. **파드 생성**  
+   ```bash
+   kubectl run myweb2 --image=nginx:1.12 --labels "app=web-svc2" --port 80
+   ```
+2. **NodePort 매니페스트**  
+   ```yaml
+   apiVersion: v1
+   kind: Service
+   metadata:
+     name: svc2
+   spec:
+     selector:
+       app: web-svc2
+     type: NodePort
+     ports:
+     - port: 80
+       targetPort: 80
+       nodePort: 30000
+       protocol: TCP
+   ```
+   ```bash
+   kubectl apply -f svc2.yaml
+   kubectl get svc
+   ```
+3. **외부 접속 테스트**  
+   - `<노드 IP>:30000` 으로 직접 접속  
+   - 장점: 쉽게 외부 공개  
+   - 단점: 노드 IP + 포트를 알아야 하고, 부하분산 제한
+
+<br/>
+
+## 5. MetalLB로 LoadBalancer 서비스 구현
+
+- 클라우드 환경(GCP, AWS 등) 없이 “Bare-metal” 서버에서 **LoadBalancer 타입** 서비스를 쓰려면 **MetalLB** 설치가 필요
+- **설치 흐름** (간략):
+  1. kube-proxy 설정에서 `strictARP: true`  
+  2. MetalLB 매니페스트(네임스페이스, metallb.yaml) 적용  
+  3. `ConfigMap` 설정(`Layer2` 모드)로 IP 풀 범위 지정 (예: 192.168.11.230~192.168.11.233)
+  4. `kubectl apply -f` 로 LoadBalancer 타입 Service 생성 → 자동 할당된 EXTERNAL-IP 확인
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc3
+spec:
+  selector:
+    app: web-svc3
+  type: LoadBalancer
+  ports:
+    - port: 80
+      targetPort: 80
+```
+- 이후 `kubectl get svc` 하면 **EXTERNAL-IP** 칸에 192.168.11.230 같은 IP가 표시  
+- 브라우저에서 `http://192.168.11.230:80`로 접속 가능
+
+<br/>
+
+## 6. Ingress: HTTP/HTTPS 라우팅 규칙
+
+### 6.1 Ingress 개념
+
+- 쿠버네티스 **Service**는 L4(TCP/UDP) 레벨에서만 포트 기반 접근을 제어하는 반면,  
+  **Ingress**는 HTTP/HTTPS **경로** 및 **호스트명**을 기반으로 라우팅 규칙을 설정  
+- 즉, 하나의 진입점에서 “`/blue` → 블루 파드, `/green` → 그린 파드” 식으로 트래픽을 분배 가능  
+- **Ingress Controller**(예: ingress-nginx, Traefik 등)를 반드시 설치해야 동작  
+- 실무에서 **도메인**(예: `www.bjkim2000.com`)을 Ingress에 매핑하여 **외부 HTTP/HTTPS** 요청을 받음
+
+### 6.2 Ingress-NGINX 설치 예시 (Bare-metal)
+
+1. **ingress-nginx** 설치 매니페스트(예: `deploy.yaml`) 적용  
+2. `type: LoadBalancer` 또는 `NodePort`로 Ingress Controller를 외부에 노출  
+3. `kubectl get svc -n ingress-nginx` → EXTERNAL-IP 확인  
+4. Windows `hosts` 파일에 `EXTERNAL-IP`와 도메인(`www.bjkim2000.com`) 매핑
+
+### 6.3 Ingress 설정 파일 예시
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: myingress
+spec:
+  rules:
+  - host: www.bjkim2000.com
+    http:
+      paths:
+      - pathType: Prefix
+        path: "/"
+        backend:
+          service:
+            name: nginx-main-svc
+            port:
+              number: 80
+      - pathType: Prefix
+        path: "/blue"
+        backend:
+          service:
+            name: nginx-blue-svc
+            port:
+              number: 80
+      - pathType: Prefix
+        path: "/green"
+        backend:
+          service:
+            name: nginx-green-svc
+            port:
+              number: 80
+
+  - host: www.guru2025.co.kr
+    http:
+      paths:
+      - pathType: Prefix
+        path: "/"
+        backend:
+          service:
+            name: httpd-main-svc
+            port:
+              number: 80
+```
+- `kubectl apply -f in.yaml` → `kubectl get ing` 확인  
+- 브라우저에서 `http://www.bjkim2000.com/blue` → nginx-blue 서비스, `http://www.guru2025.co.kr/` → httpd-main 서비스로 라우팅
+
+### 6.4 실제 운영 시나리오
+
+- **여러 웹서비스**(Nginx, Apache 등)를 각각 별도 디플로이먼트/서비스로 배포  
+- **Ingress**에서 호스트나 경로 기반으로 “이 요청은 Nginx 파드로, 저 요청은 Apache 파드로” 라우팅  
+- 버전 업 시에는 Deployment RollingUpdate를 통해 **무중단** 배포 가능  
+- 만약 특정 호스트/경로 트래픽이 많아지면, **`replicas`** 값을 늘려 스케일 아웃
+
+<br/>
+
+## 7. 종합 예제: Quiz
+
+### 7.1 조건
+
+1. **Deployment**:  
+   - 이름: `quiz-deploy`  
+   - 파드 레플리카: 5  
+   - 라벨: `app=nginx-testbed`  
+   - 컨테이너 이름: `www`, 이미지: `nginx:1.14`, 포트 80  
+2. **Service**:  
+   - 이름: `quiz-svc`  
+   - 타입: `ClusterIP`  
+   - selector: `app=nginx-testbed`  
+   - ports: port=80, targetPort=80
+
+### 7.2 정답 예시 매니페스트
+
+```yaml
+# quiz-deploy.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quiz-deploy
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: nginx-testbed
+  template:
+    metadata:
+      labels:
+        app: nginx-testbed
+    spec:
+      containers:
+      - name: www
+        image: nginx:1.14
+        ports:
+        - containerPort: 80
+---
+# quiz-svc.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: quiz-svc
+spec:
+  selector:
+    app: nginx-testbed
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+```
+- `kubectl apply -f quiz-deploy.yaml` → `kubectl apply -f quiz-svc.yaml`  
+- `kubectl get deploy,rs,po,svc` 로 전체 확인
+
+### 7.3 접속 테스트
+
+1. **클라이언트 파드 생성**  
+   ```bash
+   kubectl run client --image=nginx
+   ```
+2. **파드 내부 접속**  
+   ```bash
+   kubectl exec -it client -- bash
+   # 클러스터 내부 DNS로 quiz-svc 접근
+   curl quiz-svc
+   exit
+   ```
+- 제대로 설정됐다면 “Welcome to nginx!” 등의 페이지 응답이 나옴
+
+<br/>
+
+## 8. 마무리 정리
+
+1. **Deployment**  
+   - ReplicaSet을 내부적으로 관리 → 자동 스케일링/자가치유  
+   - RollingUpdate / Recreate 등 **업데이트 전략**으로 무중단 배포 또는 단절 배포 선택  
+   - `kubectl set image`, `rollout history`, `rollout undo`를 통해 **버전 관리** 가능
+2. **Service**  
+   - 파드의 IP가 변동되는 문제를 해결하기 위한 “대표 IP/포트”  
+   - ClusterIP, NodePort, LoadBalancer, ExternalName 등 다양한 접근 방식  
+   - 라벨(selector)로 어떤 파드들을 묶을지 정의  
+3. **LoadBalancer(MetalLB)**  
+   - 온프레미스 환경에서도 외부 IP를 자동 할당받아 NodePort 없이도 접근 가능  
+   - IP 풀 범위를 설정하여 네트워크 충돌 방지  
+4. **Ingress**  
+   - HTTP/HTTPS **경로/호스트** 기반 라우팅 (L7 레벨)  
+   - Ingress Controller 설치 필요 (ingress-nginx 등)  
+   - 도메인/호스트를 여러 개 설정 가능 → 마이크로서비스 구성 시 유용  
+5. **실무 시나리오**  
+   - **Deployment**로 컨테이너 오브젝트를 무중단 업데이트 & 스케일링  
+   - **Service**(ClusterIP/LoadBalancer)로 내부 통신 및 외부 접근을 담당  
+   - **Ingress**로 도메인 기반 라우팅(여러 앱/버전 통합), SSL/HTTPS 설정, 다양한 경로 분기
+
+---
+
+# Day 5 요약
+
+- **Deployment**  
+  - 업데이트 전략(무중단 RollingUpdate vs 다운타임 Recreate)  
+  - 롤백(rollout undo) & 히스토리(rollout history)  
+- **Service**  
+  - **ClusterIP**: 내부 전용  
+  - **NodePort**: 노드 포트 개방  
+  - **LoadBalancer**: 클라우드/MetalLB 이용, 외부 IP 자동 할당  
+  - **라벨/셀렉터**로 파드를 그룹핑, DNS(CoreDNS) 통해 내부 접근 용이  
+- **MetalLB**  
+  - Bare-metal 환경에서 LoadBalancer 서비스 사용 가능  
+  - IP 풀 범위 설정 → EXTERNAL-IP로 트래픽 분산  
+- **Ingress**  
+  - L7 계층(HTTP/HTTPS) 라우팅  
+  - Ingress Controller 필수(예: ingress-nginx)  
+  - 도메인/경로별로 서로 다른 서비스 연결  
+- **전체 흐름**  
+  - **배포**(Deployment) → **무중단 업데이트**(RollingUpdate) → **서비스**로 안정적 접근 → 필요 시 **Ingress** 설정으로 복잡한 라우팅/도메인 연결 구현
+
+---
